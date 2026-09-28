@@ -1,8 +1,7 @@
 namespace ARTR.LockSight.Cli;
 
 /// <summary>
-/// Top-level verb selected by the user.
-/// Kept as a small enum so dispatch stays a flat switch (Power of Ten: simple control flow).
+/// Top-level verb. Dispatch stays a flat switch.
 /// </summary>
 public enum AppCommand
 {
@@ -11,4 +10,6 @@ public enum AppCommand
     Drift = 2,
     Explain = 3,
     Fix = 4,
+    Diff = 5,
+    Version = 6,
 }

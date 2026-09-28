@@ -1,350 +1,110 @@
+using System.Xml;
+
 namespace ARTR.LockSight.Drift;
 
 /// <summary>
-/// Compares project/CPM pins against packages.lock.json and reports drift findings.
+/// Scans a directory, project, or solution for lockfile drift.
 /// </summary>
 public static class DriftDetector
 {
-    private const int MaxFindings = 2_000;
-
     /// <summary>
-    /// Scans <paramref name="rootPath"/> and returns all drift findings (may be empty).
+    /// Returns every finding for <paramref name="rootPath"/>. The list is empty when nothing is wrong.
     /// </summary>
     public static IReadOnlyList<DriftFinding> Scan(string rootPath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(rootPath);
 
-        string fullRoot = Path.GetFullPath(rootPath);
-        string startDir = File.Exists(fullRoot)
-            ? Path.GetDirectoryName(fullRoot) ?? fullRoot
-            : fullRoot;
-
-        IReadOnlyList<string> projects = WorkspaceScanner.FindProjectFiles(fullRoot);
-        string? cpmPath = WorkspaceScanner.FindCentralPackageManagementFile(startDir);
-        IReadOnlyDictionary<string, PackagePin> cpmPins = CentralPackageManagementReader.ReadPins(cpmPath);
-
+        ProjectSet discovered = WorkspaceScanner.Discover(rootPath);
         var findings = new List<DriftFinding>(capacity: 32);
-        var snapshots = new Dictionary<string, ProjectSnapshot>(StringComparer.OrdinalIgnoreCase);
+        ReportMissingProjects(discovered, findings);
 
-        int projectLimit = Math.Min(projects.Count, 2_000);
-        for (int i = 0; i < projectLimit; i++)
+        var snapshots = new Dictionary<string, ProjectSnapshot>(StringComparer.OrdinalIgnoreCase);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var pending = new Queue<string>();
+        EnqueueAll(discovered.Projects, pending);
+
+        while (pending.Count > 0 && seen.Count < SolutionGraph.MaxProjects && findings.Count < DriftRules.MaxFindings)
         {
-            if (findings.Count >= MaxFindings)
+            string path = pending.Dequeue();
+            if (!seen.Add(path))
             {
-                break;
+                continue;
             }
 
-            ProjectSnapshot snapshot = ProjectFileReader.Read(projects[i], cpmPins);
+            ProjectSnapshot? snapshot = TryRead(path, findings);
+            if (snapshot is null)
+            {
+                continue;
+            }
+
             snapshots[snapshot.ProjectPath] = snapshot;
-            AnalyzeProject(snapshot, findings);
+            DriftRules.AnalyzeProject(snapshot, findings);
+            EnqueueAll(snapshot.ProjectReferences, pending);
         }
 
-        // Second pass: ProjectReference-related lock issues need neighbor snapshots.
-        foreach (KeyValuePair<string, ProjectSnapshot> pair in snapshots)
+        foreach (ProjectSnapshot snapshot in snapshots.Values)
         {
-            if (findings.Count >= MaxFindings)
+            if (findings.Count >= DriftRules.MaxFindings)
             {
                 break;
             }
 
-            AnalyzeProjectReferences(pair.Value, snapshots, findings);
+            DriftRules.AnalyzeProjectReferences(snapshot, snapshots, findings);
         }
 
         return findings;
     }
 
-    private static void AnalyzeProject(ProjectSnapshot project, List<DriftFinding> findings)
+    private static void ReportMissingProjects(ProjectSet discovered, List<DriftFinding> findings)
     {
-        if (!project.RestorePackagesWithLockFile)
+        int limit = Math.Min(discovered.MissingProjects.Count, 200);
+        for (int i = 0; i < limit; i++)
         {
-            return;
-        }
-
-        if (project.LockfilePath is null)
-        {
-            AddFinding(
+            string missing = discovered.MissingProjects[i];
+            DriftRules.Add(
                 findings,
-                project.ProjectPath,
-                JoinFrameworks(project.TargetFrameworks),
-                "(project)",
-                DriftReason.MissingLockfile,
-                "RestorePackagesWithLockFile is enabled but packages.lock.json is missing.");
-            return;
-        }
-
-        LockfileDocument lockfile = LockfileReader.Read(project.LockfilePath);
-        ComparePinsToLockfile(project, lockfile, findings);
-        DetectMultiTfmMismatches(project, lockfile, findings);
-    }
-
-    private static void ComparePinsToLockfile(
-        ProjectSnapshot project,
-        LockfileDocument lockfile,
-        List<DriftFinding> findings)
-    {
-        IReadOnlyList<string> frameworks = ResolveFrameworks(project, lockfile);
-        int frameworkLimit = Math.Min(frameworks.Count, 64);
-        for (int f = 0; f < frameworkLimit; f++)
-        {
-            string tfm = frameworks[f];
-            if (!lockfile.ByFramework.TryGetValue(tfm, out IReadOnlyDictionary<string, LockDependency>? deps))
-            {
-                AddFinding(
-                    findings,
-                    project.ProjectPath,
-                    tfm,
-                    "(tfm)",
-                    DriftReason.MultiTfmMismatch,
-                    $"Project targets '{tfm}' but that TFM is absent from packages.lock.json.");
-                continue;
-            }
-
-            int pinLimit = Math.Min(project.PackageReferences.Count, 2_000);
-            for (int p = 0; p < pinLimit; p++)
-            {
-                if (findings.Count >= MaxFindings)
-                {
-                    return;
-                }
-
-                PackagePin pin = project.PackageReferences[p];
-                if (!deps.TryGetValue(pin.PackageId, out LockDependency? locked))
-                {
-                    AddFinding(
-                        findings,
-                        project.ProjectPath,
-                        tfm,
-                        pin.PackageId,
-                        DriftReason.PinDrift,
-                        $"Package is referenced at {pin.Version} (from {DescribeSource(pin.Source)}) but is not present in the lockfile for {tfm}.");
-                    continue;
-                }
-
-                if (!VersionsCompatible(pin.Version, locked.Resolved, locked.Requested))
-                {
-                    AddFinding(
-                        findings,
-                        project.ProjectPath,
-                        tfm,
-                        pin.PackageId,
-                        DriftReason.PinDrift,
-                        $"Pinned {pin.Version} (from {DescribeSource(pin.Source)}) but lockfile resolved {locked.Resolved} (requested {locked.Requested}).");
-                }
-            }
+                discovered.OriginPath,
+                "-",
+                Path.GetFileName(missing),
+                DriftReason.ProjectReferenceLockIssue,
+                $"Solution lists '{missing}' but the file does not exist.");
         }
     }
 
-    private static void DetectMultiTfmMismatches(
-        ProjectSnapshot project,
-        LockfileDocument lockfile,
-        List<DriftFinding> findings)
+    private static ProjectSnapshot? TryRead(string path, List<DriftFinding> findings)
     {
-        if (lockfile.ByFramework.Count < 2)
+        try
         {
-            return;
+            return ProjectFileReader.Read(path);
         }
-
-        // For each direct package, ensure resolved versions agree across TFMs when the package appears in multiple.
-        var directIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        int pinLimit = Math.Min(project.PackageReferences.Count, 2_000);
-        for (int i = 0; i < pinLimit; i++)
+        catch (Exception ex) when (ex is XmlException or IOException or InvalidDataException)
         {
-            directIds.Add(project.PackageReferences[i].PackageId);
+            DriftRules.Add(findings, path, "-", Path.GetFileName(path), DriftReason.UnreadableInput, Trim(ex.Message));
+            return null;
         }
+    }
 
-        string[] frameworks = new string[lockfile.ByFramework.Count];
-        int frameworkIndex = 0;
-        foreach (string key in lockfile.ByFramework.Keys)
+    private static void EnqueueAll(IReadOnlyList<string> paths, Queue<string> pending)
+    {
+        int limit = Math.Min(paths.Count, 512);
+        for (int i = 0; i < limit; i++)
         {
-            frameworks[frameworkIndex] = key;
-            frameworkIndex++;
-        }
-
-        foreach (string packageId in directIds)
-        {
-            if (findings.Count >= MaxFindings)
+            if (pending.Count >= SolutionGraph.MaxProjects)
             {
                 return;
             }
 
-            string? firstResolved = null;
-            string? firstTfm = null;
-            for (int i = 0; i < frameworks.Length; i++)
-            {
-                IReadOnlyDictionary<string, LockDependency> deps = lockfile.ByFramework[frameworks[i]];
-                if (!deps.TryGetValue(packageId, out LockDependency? dep) || !dep.IsDirect)
-                {
-                    continue;
-                }
-
-                if (firstResolved is null)
-                {
-                    firstResolved = dep.Resolved;
-                    firstTfm = frameworks[i];
-                    continue;
-                }
-
-                if (!string.Equals(firstResolved, dep.Resolved, StringComparison.OrdinalIgnoreCase))
-                {
-                    AddFinding(
-                        findings,
-                        project.ProjectPath,
-                        frameworks[i],
-                        packageId,
-                        DriftReason.MultiTfmMismatch,
-                        $"Resolved version differs across TFMs: {firstTfm}={firstResolved}, {frameworks[i]}={dep.Resolved}.");
-                    break;
-                }
-            }
+            pending.Enqueue(paths[i]);
         }
     }
 
-    private static void AnalyzeProjectReferences(
-        ProjectSnapshot project,
-        IReadOnlyDictionary<string, ProjectSnapshot> snapshots,
-        List<DriftFinding> findings)
+    private static string Trim(string message)
     {
-        if (!project.RestorePackagesWithLockFile)
+        if (message.Length <= 400)
         {
-            return;
+            return message;
         }
 
-        int refLimit = Math.Min(project.ProjectReferences.Count, 512);
-        for (int i = 0; i < refLimit; i++)
-        {
-            if (findings.Count >= MaxFindings)
-            {
-                return;
-            }
-
-            string referencedPath = project.ProjectReferences[i];
-            if (!File.Exists(referencedPath))
-            {
-                AddFinding(
-                    findings,
-                    project.ProjectPath,
-                    JoinFrameworks(project.TargetFrameworks),
-                    Path.GetFileName(referencedPath),
-                    DriftReason.ProjectReferenceLockIssue,
-                    $"ProjectReference path does not exist: {referencedPath}");
-                continue;
-            }
-
-            if (!snapshots.TryGetValue(referencedPath, out ProjectSnapshot? referenced))
-            {
-                // Referenced project may be outside the scan root; still check for a sibling lockfile.
-                string siblingLock = Path.Combine(
-                    Path.GetDirectoryName(referencedPath) ?? ".",
-                    "packages.lock.json");
-                if (!File.Exists(siblingLock))
-                {
-                    continue;
-                }
-
-                // Outside snapshot but has a lockfile — no further local comparison.
-                continue;
-            }
-
-            if (referenced.RestorePackagesWithLockFile && referenced.LockfilePath is null)
-            {
-                AddFinding(
-                    findings,
-                    project.ProjectPath,
-                    JoinFrameworks(project.TargetFrameworks),
-                    Path.GetFileName(referenced.ProjectPath),
-                    DriftReason.ProjectReferenceLockIssue,
-                    $"Referenced project '{referenced.ProjectPath}' expects a lockfile but packages.lock.json is missing. RestoreLockedMode can fail transitively (NU1004).");
-            }
-        }
-    }
-
-    private static IReadOnlyList<string> ResolveFrameworks(ProjectSnapshot project, LockfileDocument lockfile)
-    {
-        if (project.TargetFrameworks.Count > 0)
-        {
-            return project.TargetFrameworks;
-        }
-
-        var keys = new List<string>(lockfile.ByFramework.Count);
-        foreach (string key in lockfile.ByFramework.Keys)
-        {
-            keys.Add(key);
-        }
-
-        return keys;
-    }
-
-    /// <summary>
-    /// Returns true when the project pin matches the lockfile resolved version,
-    /// or when the pin is a floating range that still contains the resolved version (best-effort).
-    /// </summary>
-    internal static bool VersionsCompatible(string pinned, string resolved, string requested)
-    {
-        if (string.IsNullOrWhiteSpace(resolved))
-        {
-            return false;
-        }
-
-        if (string.Equals(pinned, resolved, StringComparison.OrdinalIgnoreCase))
-        {
-            return true;
-        }
-
-        // Exact pin inside NuGet range brackets, e.g. "[1.2.3]".
-        if (pinned.StartsWith('[') && pinned.EndsWith(']') && !pinned.Contains(','))
-        {
-            string inner = pinned.Trim('[', ']').Trim();
-            return string.Equals(inner, resolved, StringComparison.OrdinalIgnoreCase);
-        }
-
-        // If the lockfile still records the same requested string as the pin, treat as compatible.
-        if (!string.IsNullOrWhiteSpace(requested) &&
-            string.Equals(NormalizeRange(pinned), NormalizeRange(requested), StringComparison.OrdinalIgnoreCase))
-        {
-            // Floating pins can resolve differently after --force-evaluate; flag only when resolved clearly differs
-            // from a concrete pin. For ranges like "1.0.*", we cannot prove drift offline — skip.
-            if (pinned.Contains('*') || pinned.Contains(',') || pinned.StartsWith('[') || pinned.StartsWith('('))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private static string NormalizeRange(string value)
-    {
-        return value.Trim();
-    }
-
-    private static string DescribeSource(string sourcePath)
-    {
-        return Path.GetFileName(sourcePath);
-    }
-
-    private static string JoinFrameworks(IReadOnlyList<string> frameworks)
-    {
-        if (frameworks.Count == 0)
-        {
-            return "-";
-        }
-
-        return string.Join(';', frameworks);
-    }
-
-    private static void AddFinding(
-        List<DriftFinding> findings,
-        string projectPath,
-        string tfm,
-        string packageId,
-        DriftReason reason,
-        string detail)
-    {
-        if (findings.Count >= MaxFindings)
-        {
-            return;
-        }
-
-        findings.Add(new DriftFinding(projectPath, tfm, packageId, reason, detail));
+        return message[..400];
     }
 }

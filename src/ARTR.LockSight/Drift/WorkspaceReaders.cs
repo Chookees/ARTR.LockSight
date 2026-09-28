@@ -4,8 +4,8 @@ using System.Xml.Linq;
 namespace ARTR.LockSight.Drift;
 
 /// <summary>
-/// File-system discovery for projects, CPM props, and lockfiles.
-/// All loops have fixed upper bounds (Power of Ten rule 2).
+/// File-system discovery for projects, props, and lockfiles.
+/// Directory walks are iterative and bounded (no recursion).
 /// </summary>
 public static class WorkspaceScanner
 {
@@ -20,9 +20,9 @@ public static class WorkspaceScanner
     ];
 
     /// <summary>
-    /// Finds project files under <paramref name="rootPath"/> (non-recursive into bin/obj/.git).
+    /// Resolves a directory, project, or solution into project paths.
     /// </summary>
-    public static IReadOnlyList<string> FindProjectFiles(string rootPath)
+    public static ProjectSet Discover(string rootPath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(rootPath);
 
@@ -32,29 +32,42 @@ public static class WorkspaceScanner
             throw new DirectoryNotFoundException($"Target path not found: {fullRoot}");
         }
 
-        if (File.Exists(fullRoot))
+        var projects = new List<string>(capacity: 64);
+        var missing = new List<string>(capacity: 8);
+        if (Directory.Exists(fullRoot))
         {
-            return IsProjectFile(fullRoot)
-                ? [fullRoot]
-                : Array.Empty<string>();
+            CollectProjectsIterative(fullRoot, projects);
+            return new ProjectSet(fullRoot, projects, missing);
         }
 
-        var results = new List<string>(capacity: 64);
-        CollectProjectsIterative(fullRoot, results);
-        return results;
+        if (IsProjectFile(fullRoot))
+        {
+            projects.Add(fullRoot);
+            return new ProjectSet(fullRoot, projects, missing);
+        }
+
+        if (SolutionGraph.IsSolution(fullRoot))
+        {
+            SolutionGraph.Read(fullRoot, projects, missing);
+            return new ProjectSet(fullRoot, projects, missing);
+        }
+
+        throw new InvalidDataException($"Target is not a directory, project, or solution: {fullRoot}");
     }
 
     /// <summary>
-    /// Walks upward from <paramref name="startDirectory"/> looking for Directory.Packages.props.
+    /// Walks upward from <paramref name="startDirectory"/> for the nearest file of this name.
+    /// MSBuild and NuGet stop at the first ancestor, so this does too.
     /// </summary>
-    public static string? FindCentralPackageManagementFile(string startDirectory)
+    public static string? FindAncestorFile(string startDirectory, string fileName)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(startDirectory);
+        ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
 
         string? current = Path.GetFullPath(startDirectory);
         for (int i = 0; i < MaxDirectoryDepth && current is not null; i++)
         {
-            string candidate = Path.Combine(current, "Directory.Packages.props");
+            string candidate = Path.Combine(current, fileName);
             if (File.Exists(candidate))
             {
                 return candidate;
@@ -67,9 +80,6 @@ public static class WorkspaceScanner
         return null;
     }
 
-    /// <summary>
-    /// Breadth-first directory walk with fixed bounds (no recursion).
-    /// </summary>
     private static void CollectProjectsIterative(string rootDirectory, List<string> results)
     {
         var pending = new Queue<(string Path, int Depth)>();
@@ -195,9 +205,8 @@ public static class CentralPackageManagementReader
         }
 
         XDocument doc = XDocument.Load(propsPath);
-        IEnumerable<XElement> items = doc.Descendants("PackageVersion");
         int count = 0;
-        foreach (XElement item in items)
+        foreach (XElement item in doc.Descendants("PackageVersion"))
         {
             if (count >= MaxPackageVersions)
             {
@@ -220,167 +229,105 @@ public static class CentralPackageManagementReader
 }
 
 /// <summary>
-/// Parses a .csproj/.fsproj/.vbproj into a <see cref="ProjectSnapshot"/>.
+/// Parses a project plus the nearest Directory.Build.props / .targets and Directory.Packages.props.
+/// Import order matches MSBuild: props, then the project, then targets.
 /// </summary>
 public static class ProjectFileReader
 {
-    private const int MaxItems = 2_000;
-
-    public static ProjectSnapshot Read(string projectPath, IReadOnlyDictionary<string, PackagePin> cpmPins)
+    public static ProjectSnapshot Read(string projectPath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectPath);
-        ArgumentNullException.ThrowIfNull(cpmPins);
-
         if (!File.Exists(projectPath))
         {
             throw new FileNotFoundException("Project file not found.", projectPath);
         }
 
-        XDocument doc = XDocument.Load(projectPath);
-        IReadOnlyList<string> tfms = ReadTargetFrameworks(doc);
-        IReadOnlyList<PackagePin> packages = ReadPackageReferences(doc, projectPath, cpmPins);
-        IReadOnlyList<string> projectRefs = ReadProjectReferences(doc, projectPath);
-        bool useLockFile = ReadRestorePackagesWithLockFile(doc);
-        string lockfilePath = Path.Combine(Path.GetDirectoryName(projectPath) ?? ".", "packages.lock.json");
-        string? resolvedLock = File.Exists(lockfilePath) ? lockfilePath : null;
+        string fullProject = Path.GetFullPath(projectPath);
+        string projectDir = Path.GetDirectoryName(fullProject) ?? ".";
+        XDocument projectDoc = XDocument.Load(fullProject);
 
-        // Presence of a lockfile implies the project uses lockfiles even if the property is unset.
-        if (resolvedLock is not null)
+        string? propsPath = WorkspaceScanner.FindAncestorFile(projectDir, "Directory.Build.props");
+        string? targetsPath = WorkspaceScanner.FindAncestorFile(projectDir, "Directory.Build.targets");
+        string? cpmPath = WorkspaceScanner.FindAncestorFile(projectDir, "Directory.Packages.props");
+        XDocument? propsDoc = LoadIfExists(propsPath);
+        XDocument? targetsDoc = LoadIfExists(targetsPath);
+        IReadOnlyDictionary<string, PackagePin> cpmPins = CentralPackageManagementReader.ReadPins(cpmPath);
+
+        var packages = new Dictionary<string, PackagePin>(StringComparer.OrdinalIgnoreCase);
+        if (propsDoc is not null && propsPath is not null)
         {
-            useLockFile = true;
+            PackageGraphReader.MergePackageReferences(propsDoc, propsPath, cpmPins, packages);
         }
 
-        return new ProjectSnapshot(
-            projectPath,
-            tfms,
-            packages,
-            projectRefs,
-            useLockFile,
-            resolvedLock);
+        PackageGraphReader.MergePackageReferences(projectDoc, fullProject, cpmPins, packages);
+        if (targetsDoc is not null && targetsPath is not null)
+        {
+            PackageGraphReader.MergePackageReferences(targetsDoc, targetsPath, cpmPins, packages);
+        }
+
+        IReadOnlyList<string> frameworks = LayerFrameworks(propsDoc, projectDoc, targetsDoc);
+        IReadOnlyList<string> projectRefs = PackageGraphReader.ReadProjectReferences(projectDoc, fullProject);
+        bool? useLockFile = LayerBool(propsDoc, projectDoc, targetsDoc, "RestorePackagesWithLockFile");
+        bool lockedMode = LayerBool(propsDoc, projectDoc, targetsDoc, "RestoreLockedMode") == true;
+        string lockCandidate = Path.Combine(projectDir, "packages.lock.json");
+        string? lockfilePath = File.Exists(lockCandidate) ? lockCandidate : null;
+        var policy = new LockfilePolicy(useLockFile, lockedMode, lockfilePath);
+        var pinList = new List<PackagePin>(packages.Count);
+        foreach (PackagePin pin in packages.Values)
+        {
+            pinList.Add(pin);
+        }
+
+        return new ProjectSnapshot(fullProject, frameworks, pinList, projectRefs, policy);
     }
 
-    private static IReadOnlyList<string> ReadTargetFrameworks(XDocument doc)
+    private static XDocument? LoadIfExists(string? path)
     {
-        var list = new List<string>(capacity: 4);
-        string? single = FirstProperty(doc, "TargetFramework");
-        if (!string.IsNullOrWhiteSpace(single))
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
         {
-            list.Add(single.Trim());
-            return list;
+            return null;
         }
 
-        string? multi = FirstProperty(doc, "TargetFrameworks");
-        if (string.IsNullOrWhiteSpace(multi))
-        {
-            return list;
-        }
-
-        string[] parts = multi.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        int limit = Math.Min(parts.Length, 32);
-        for (int i = 0; i < limit; i++)
-        {
-            if (!string.IsNullOrWhiteSpace(parts[i]))
-            {
-                list.Add(parts[i]);
-            }
-        }
-
-        return list;
+        return XDocument.Load(path);
     }
 
-    private static IReadOnlyList<PackagePin> ReadPackageReferences(
-        XDocument doc,
-        string projectPath,
-        IReadOnlyDictionary<string, PackagePin> cpmPins)
+    private static IReadOnlyList<string> LayerFrameworks(XDocument? props, XDocument project, XDocument? targets)
     {
-        var list = new List<PackagePin>(capacity: 32);
-        int count = 0;
-        foreach (XElement item in doc.Descendants("PackageReference"))
+        IReadOnlyList<string> result = props is null ? [] : PackageGraphReader.ReadTargetFrameworks(props);
+        IReadOnlyList<string> fromProject = PackageGraphReader.ReadTargetFrameworks(project);
+        if (fromProject.Count > 0)
         {
-            if (count >= MaxItems)
-            {
-                break;
-            }
-
-            string? id = (string?)item.Attribute("Include") ?? (string?)item.Attribute("Update");
-            if (string.IsNullOrWhiteSpace(id))
-            {
-                continue;
-            }
-
-            string? version = (string?)item.Attribute("Version") ?? (string?)item.Element("Version");
-            string source = projectPath;
-            if (string.IsNullOrWhiteSpace(version))
-            {
-                if (cpmPins.TryGetValue(id, out PackagePin? cpmPin))
-                {
-                    version = cpmPin.Version;
-                    source = cpmPin.Source;
-                }
-                else
-                {
-                    continue;
-                }
-            }
-
-            list.Add(new PackagePin(id, version, source));
-            count++;
+            result = fromProject;
         }
 
-        return list;
+        if (targets is null)
+        {
+            return result;
+        }
+
+        IReadOnlyList<string> fromTargets = PackageGraphReader.ReadTargetFrameworks(targets);
+        return fromTargets.Count > 0 ? fromTargets : result;
     }
 
-    private static IReadOnlyList<string> ReadProjectReferences(XDocument doc, string projectPath)
+    private static bool? LayerBool(XDocument? props, XDocument project, XDocument? targets, string name)
     {
-        string? projectDir = Path.GetDirectoryName(projectPath);
-        var list = new List<string>(capacity: 16);
-        int count = 0;
-        foreach (XElement item in doc.Descendants("ProjectReference"))
+        OptionalBool layered = props is null ? OptionalBool.Absent : PackageGraphReader.ReadBoolProperty(props, name);
+        OptionalBool fromProject = PackageGraphReader.ReadBoolProperty(project, name);
+        if (fromProject.IsPresent)
         {
-            if (count >= MaxItems)
-            {
-                break;
-            }
-
-            string? include = (string?)item.Attribute("Include");
-            if (string.IsNullOrWhiteSpace(include))
-            {
-                continue;
-            }
-
-            string combined = projectDir is null
-                ? include
-                : Path.GetFullPath(Path.Combine(projectDir, include));
-            list.Add(combined);
-            count++;
+            layered = fromProject;
         }
 
-        return list;
-    }
-
-    private static bool ReadRestorePackagesWithLockFile(XDocument doc)
-    {
-        string? value = FirstProperty(doc, "RestorePackagesWithLockFile");
-        if (string.IsNullOrWhiteSpace(value))
+        if (targets is not null)
         {
-            return false;
-        }
-
-        return value.Equals("true", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string? FirstProperty(XDocument doc, string name)
-    {
-        foreach (XElement el in doc.Descendants(name))
-        {
-            string? text = el.Value;
-            if (!string.IsNullOrWhiteSpace(text))
+            OptionalBool fromTargets = PackageGraphReader.ReadBoolProperty(targets, name);
+            if (fromTargets.IsPresent)
             {
-                return text.Trim();
+                layered = fromTargets;
             }
         }
 
-        return null;
+        return layered.IsPresent ? layered.Value : null;
     }
 }
 
@@ -403,7 +350,6 @@ public static class LockfileReader
         string json = File.ReadAllText(lockfilePath);
         using JsonDocument doc = JsonDocument.Parse(json);
         JsonElement root = doc.RootElement;
-
         var byFramework = new Dictionary<string, IReadOnlyDictionary<string, LockDependency>>(
             StringComparer.OrdinalIgnoreCase);
 
@@ -420,33 +366,38 @@ public static class LockfileReader
                 break;
             }
 
-            var packages = new Dictionary<string, LockDependency>(StringComparer.OrdinalIgnoreCase);
-            int packageCount = 0;
-            foreach (JsonProperty package in framework.Value.EnumerateObject())
-            {
-                if (packageCount >= MaxPackagesPerFramework)
-                {
-                    break;
-                }
-
-                string type = ReadStringProperty(package.Value, "type");
-                string requested = ReadStringProperty(package.Value, "requested");
-                string resolved = ReadStringProperty(package.Value, "resolved");
-                packages[package.Name] = new LockDependency(package.Name, type, requested, resolved);
-                packageCount++;
-            }
-
-            byFramework[framework.Name] = packages;
+            byFramework[framework.Name] = ReadFramework(framework.Value);
             frameworkCount++;
         }
 
         return new LockfileDocument(lockfilePath, byFramework);
     }
 
-    private static string ReadStringProperty(JsonElement element, string name)
+    private static IReadOnlyDictionary<string, LockDependency> ReadFramework(JsonElement framework)
     {
-        if (element.TryGetProperty(name, out JsonElement value) &&
-            value.ValueKind == JsonValueKind.String)
+        var packages = new Dictionary<string, LockDependency>(StringComparer.OrdinalIgnoreCase);
+        int packageCount = 0;
+        foreach (JsonProperty package in framework.EnumerateObject())
+        {
+            if (packageCount >= MaxPackagesPerFramework)
+            {
+                break;
+            }
+
+            string type = ReadString(package.Value, "type");
+            string requested = ReadString(package.Value, "requested");
+            string resolved = ReadString(package.Value, "resolved");
+            string contentHash = ReadString(package.Value, "contentHash");
+            packages[package.Name] = new LockDependency(package.Name, type, requested, resolved, contentHash);
+            packageCount++;
+        }
+
+        return packages;
+    }
+
+    private static string ReadString(JsonElement element, string name)
+    {
+        if (element.TryGetProperty(name, out JsonElement value) && value.ValueKind == JsonValueKind.String)
         {
             return value.GetString() ?? string.Empty;
         }

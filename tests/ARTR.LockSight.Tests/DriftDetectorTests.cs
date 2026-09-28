@@ -105,7 +105,7 @@ public sealed class DriftDetectorTests
 
         IReadOnlyList<DriftFinding> findings = DriftDetector.Scan(root);
 
-        Assert.Contains(findings, f => f.Reason == DriftReason.MultiTfmMismatch);
+        Assert.Contains(findings, f => f.Reason == DriftReason.MultiTfmVersionSkew);
     }
 
     [Fact]
@@ -219,9 +219,11 @@ public sealed class DriftDetectorTests
     [InlineData("13.0.1", "13.0.1", "[13.0.1, )", true)]
     [InlineData("13.0.3", "13.0.1", "[13.0.1, )", false)]
     [InlineData("[13.0.1]", "13.0.1", "[13.0.1]", true)]
+    [InlineData("13.0.3", "13.0.4", "[13.0.3, )", true)]
+    [InlineData("13.0.3", "13.0.3", "[13.0.1, )", false)]
     public void VersionsCompatible_matches_expected(string pin, string resolved, string requested, bool expected)
     {
-        Assert.Equal(expected, DriftDetector.VersionsCompatible(pin, resolved, requested));
+        Assert.Equal(expected, PinCompatibility.IsCompatible(pin, resolved, requested, out _));
     }
 
     private static string CreateTempDir()
