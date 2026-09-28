@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ARTR.LockSight/ARTR.LockSight.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/ARTR.LockSight.Tests/ARTR.LockSight.Tests.csproj" />
+  </Folder>
+</Solution>
