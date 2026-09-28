@@ -3,15 +3,15 @@ using System.Diagnostics;
 namespace ARTR.LockSight.Fix;
 
 /// <summary>
-/// Wraps `dotnet restore --force-evaluate` with safe defaults and clear output.
+/// Wraps <c>dotnet restore --force-evaluate</c>. Output is read asynchronously so a full
+/// pipe buffer cannot deadlock the child process.
 /// </summary>
 public static class RestoreFixer
 {
     private const int DefaultTimeoutMs = 600_000;
 
     /// <summary>
-    /// Runs restore --force-evaluate against a solution, project, or directory.
-    /// Returns the process exit code (0 = success).
+    /// Runs restore against a solution, project, or directory. Returns the process exit code.
     /// </summary>
     public static int RunForceEvaluate(string targetPath, TextWriter stdout, TextWriter stderr)
     {
@@ -27,16 +27,9 @@ public static class RestoreFixer
         }
 
         string restoreTarget = ResolveRestoreTarget(fullPath);
-        string args = BuildArguments(restoreTarget);
-
-        stdout.WriteLine("ARTR.LockSight fix: regenerating lockfiles via NuGet force-evaluate.");
-        stdout.WriteLine($"  Command: dotnet {args}");
-        stdout.WriteLine();
-
         var startInfo = new ProcessStartInfo
         {
             FileName = "dotnet",
-            Arguments = args,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -45,7 +38,47 @@ public static class RestoreFixer
                 ? fullPath
                 : Path.GetDirectoryName(fullPath) ?? Environment.CurrentDirectory,
         };
+        AddRestoreArguments(startInfo, restoreTarget);
+        stdout.WriteLine("ARTR.LockSight fix: regenerating lockfiles via NuGet force-evaluate.");
+        stdout.WriteLine("  Command: dotnet " + string.Join(' ', startInfo.ArgumentList));
+        stdout.WriteLine();
+        return Run(startInfo, stdout, stderr);
+    }
 
+    internal static string ResolveRestoreTarget(string fullPath)
+    {
+        if (File.Exists(fullPath))
+        {
+            return fullPath;
+        }
+
+        string[] solutions = Directory.GetFiles(fullPath, "*.sln");
+        if (solutions.Length == 1)
+        {
+            return solutions[0];
+        }
+
+        string[] slnx = Directory.GetFiles(fullPath, "*.slnx");
+        if (slnx.Length == 1)
+        {
+            return slnx[0];
+        }
+
+        return fullPath;
+    }
+
+    internal static void AddRestoreArguments(ProcessStartInfo startInfo, string restoreTarget)
+    {
+        ArgumentNullException.ThrowIfNull(startInfo);
+        ArgumentException.ThrowIfNullOrWhiteSpace(restoreTarget);
+        startInfo.ArgumentList.Add("restore");
+        startInfo.ArgumentList.Add(restoreTarget);
+        startInfo.ArgumentList.Add("--force-evaluate");
+        startInfo.ArgumentList.Add("--nologo");
+    }
+
+    private static int Run(ProcessStartInfo startInfo, TextWriter stdout, TextWriter stderr)
+    {
         using var process = new Process { StartInfo = startInfo };
         try
         {
@@ -61,76 +94,48 @@ public static class RestoreFixer
             return 2;
         }
 
-        string standardOut = process.StandardOutput.ReadToEnd();
-        string standardErr = process.StandardError.ReadToEnd();
+        Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync();
+        Task<string> stderrTask = process.StandardError.ReadToEndAsync();
         bool exited = process.WaitForExit(DefaultTimeoutMs);
         if (!exited)
         {
-            try
-            {
-                process.Kill(entireProcessTree: true);
-            }
-            catch (InvalidOperationException)
-            {
-                // Already exited.
-            }
-
+            TryKill(process);
             stderr.WriteLine($"dotnet restore timed out after {DefaultTimeoutMs} ms.");
             return 2;
         }
 
-        if (!string.IsNullOrWhiteSpace(standardOut))
-        {
-            stdout.WriteLine(standardOut.TrimEnd());
-        }
-
-        if (!string.IsNullOrWhiteSpace(standardErr))
-        {
-            stderr.WriteLine(standardErr.TrimEnd());
-        }
-
+        WriteCaptured(stdout, stdoutTask);
+        WriteCaptured(stderr, stderrTask);
         stdout.WriteLine();
         if (process.ExitCode == 0)
         {
             stdout.WriteLine("ARTR.LockSight fix: restore --force-evaluate completed successfully.");
             stdout.WriteLine("Review and commit any updated packages.lock.json files.");
-        }
-        else
-        {
-            stderr.WriteLine($"ARTR.LockSight fix: restore failed with exit code {process.ExitCode}.");
+            return 0;
         }
 
+        stderr.WriteLine($"ARTR.LockSight fix: restore failed with exit code {process.ExitCode}.");
         return process.ExitCode;
     }
 
-    private static string ResolveRestoreTarget(string fullPath)
+    private static void WriteCaptured(TextWriter writer, Task<string> task)
     {
-        if (File.Exists(fullPath))
+        string text = task.GetAwaiter().GetResult();
+        if (!string.IsNullOrWhiteSpace(text))
         {
-            return fullPath;
+            writer.WriteLine(text.TrimEnd());
         }
-
-        // Prefer a solution file in the directory when present.
-        string[] solutions = Directory.GetFiles(fullPath, "*.sln");
-        if (solutions.Length == 1)
-        {
-            return solutions[0];
-        }
-
-        string[] slnx = Directory.GetFiles(fullPath, "*.slnx");
-        if (slnx.Length == 1)
-        {
-            return slnx[0];
-        }
-
-        // Directory restore lets the SDK discover projects.
-        return fullPath;
     }
 
-    private static string BuildArguments(string restoreTarget)
+    private static void TryKill(Process process)
     {
-        // --force-evaluate regenerates lockfiles; --ignore-failed-sources keeps local diagnosis moving
-        // when an optional feed is briefly unreachable (safe default for a doctor tool).
-        return $"restore \"{restoreTarget}\" --force-evaluate --nologo";
+        try
+        {
+            process.Kill(entireProcessTree: true);
+        }
+        catch (InvalidOperationException)
+        {
+            // Already exited.
+        }
     }
 }

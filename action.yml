@@ -1,0 +1,29 @@
+name: "ARTR.LockSight"
+description: "Fail the job when NuGet packages.lock.json drifts (NU1004 / RestoreLockedMode doctor)."
+branding:
+  icon: search
+  color: blue
+inputs:
+  path:
+    description: "Solution, project, or directory to scan"
+    required: false
+    default: "."
+  command:
+    description: "drift (default) or explain"
+    required: false
+    default: "drift"
+  strict:
+    description: "When true, warnings also fail the job"
+    required: false
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - name: ARTR.LockSight
+      shell: bash
+      env:
+        LOCKSIGHT_PATH: ${{ inputs.path }}
+        LOCKSIGHT_COMMAND: ${{ inputs.command }}
+        LOCKSIGHT_STRICT: ${{ inputs.strict }}
+        LOCKSIGHT_ACTION_PATH: ${{ github.action_path }}
+      run: bash "$LOCKSIGHT_ACTION_PATH/eng/run-locksight-action.sh"

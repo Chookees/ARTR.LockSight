@@ -1,7 +1,8 @@
 namespace ARTR.LockSight.Drift;
 
 /// <summary>
-/// Categorized reason a lockfile entry disagrees with project/CPM pins.
+/// Why a project and its packages.lock.json disagree.
+/// Warnings are real, but they often do not fail RestoreLockedMode by themselves.
 /// </summary>
 public enum DriftReason
 {
@@ -11,4 +12,8 @@ public enum DriftReason
     ProjectReferenceLockIssue = 3,
     MissingLockfile = 4,
     OrphanLockEntry = 5,
+    MultiTfmVersionSkew = 6,
+    StaleTfm = 7,
+    LockfileInconsistent = 8,
+    UnreadableInput = 9,
 }

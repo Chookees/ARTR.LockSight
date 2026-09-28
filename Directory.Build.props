@@ -1,0 +1,10 @@
+<Project>
+  <!--
+    Repo-wide lockfile policy. ARTR.LockSight reads the nearest Directory.Build.props
+    the same way MSBuild imports it, so this file is also a dogfood fixture.
+  -->
+  <PropertyGroup>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestoreLockedMode>true</RestoreLockedMode>
+  </PropertyGroup>
+</Project>

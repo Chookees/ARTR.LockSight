@@ -1,7 +1,7 @@
 namespace ARTR.LockSight.Drift;
 
 /// <summary>
-/// One reported drift finding. Designed for table/CI line output.
+/// One drift row. Severity is derived from <see cref="Reason"/> so callers stay at five arguments.
 /// </summary>
 public sealed class DriftFinding
 {
@@ -29,4 +29,11 @@ public sealed class DriftFinding
         Reason = reason;
         Detail = detail;
     }
+
+    /// <summary>
+    /// Warnings are printed and do not fail <c>--ci</c> unless <c>--strict</c> is set.
+    /// Cross-TFM version differences and leftover TFM sections are often legitimate.
+    /// </summary>
+    public bool IsWarning =>
+        Reason is DriftReason.MultiTfmVersionSkew or DriftReason.StaleTfm;
 }

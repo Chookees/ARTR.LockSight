@@ -8,7 +8,7 @@ namespace ARTR.LockSight;
 
 /// <summary>
 /// Entry point for the artr-locksight dotnet tool.
-/// Local NuGet lockfile doctor — not a Dependabot replacement.
+/// Exit 0: success. Exit 1: --ci found blocking drift or diff changes. Exit 2: usage or runtime error.
 /// </summary>
 public static class Program
 {
@@ -26,8 +26,10 @@ public static class Program
             return options.Command switch
             {
                 AppCommand.Help => WriteHelpAndExit(),
+                AppCommand.Version => WriteVersion(),
                 AppCommand.Explain => RunExplain(options),
                 AppCommand.Fix => RunFix(options),
+                AppCommand.Diff => RunDiff(options),
                 AppCommand.Drift => RunDrift(options),
                 _ => WriteHelpAndExit(),
             };
@@ -37,6 +39,12 @@ public static class Program
             Console.Error.WriteLine($"error: {ex.Message}");
             return 2;
         }
+    }
+
+    private static int WriteVersion()
+    {
+        Console.Out.WriteLine($"ARTR.LockSight {ToolVersion.Current}");
+        return 0;
     }
 
     private static int RunExplain(AppOptions options)
@@ -53,42 +61,55 @@ public static class Program
     private static int RunDrift(AppOptions options)
     {
         IReadOnlyList<DriftFinding> findings = DriftDetector.Scan(options.TargetPath);
-        DriftReporter.WriteReport(findings, Console.Out, options.CiMode);
-
-        int exitCode = 0;
-        if (options.CiMode && findings.Count > 0)
+        WriteDrift(options, findings);
+        int exitCode = CiExit(options, DriftReporter.CountBlocking(findings, options.Strict), "drift finding(s)");
+        if (!options.FixRequested)
         {
-            exitCode = 1;
-            Console.Error.WriteLine(
-                $"ARTR.LockSight --ci: exiting {exitCode} because {findings.Count} drift finding(s) were reported.");
+            return exitCode;
         }
 
-        if (options.FixRequested)
+        Console.Out.WriteLine();
+        int fixCode = RestoreFixer.RunForceEvaluate(options.TargetPath, Console.Out, Console.Error);
+        if (fixCode != 0 || !options.CiMode)
         {
-            Console.Out.WriteLine();
-            int fixCode = RestoreFixer.RunForceEvaluate(options.TargetPath, Console.Out, Console.Error);
-            if (fixCode != 0)
-            {
-                return fixCode;
-            }
-
-            // Re-scan after fix when in CI so the pipeline still fails if drift remains.
-            if (options.CiMode)
-            {
-                IReadOnlyList<DriftFinding> after = DriftDetector.Scan(options.TargetPath);
-                DriftReporter.WriteReport(after, Console.Out, ciMode: true);
-                if (after.Count > 0)
-                {
-                    Console.Error.WriteLine(
-                        $"ARTR.LockSight --ci: still {after.Count} finding(s) after --fix.");
-                    return 1;
-                }
-
-                return 0;
-            }
+            return fixCode != 0 ? fixCode : exitCode;
         }
 
-        return exitCode;
+        IReadOnlyList<DriftFinding> after = DriftDetector.Scan(options.TargetPath);
+        WriteDrift(options, after);
+        int still = DriftReporter.CountBlocking(after, options.Strict);
+        if (still > 0)
+        {
+            Console.Error.WriteLine($"ARTR.LockSight --ci: still {still} blocking finding(s) after --fix.");
+            return 1;
+        }
+
+        return 0;
+    }
+
+    private static int RunDiff(AppOptions options)
+    {
+        IReadOnlyList<LockDiffEntry> changes = LockfileDiffer.Compare(options.TargetPath, options.ComparePath);
+        TextWriter? annotations = options.Format == OutputFormat.Json ? Console.Error : null;
+        DiffReporter.WriteReport(changes, Console.Out, options.CiMode, options.Format, annotations);
+        return CiExit(options, changes.Count, "diff change(s)");
+    }
+
+    private static void WriteDrift(AppOptions options, IReadOnlyList<DriftFinding> findings)
+    {
+        TextWriter? annotations = options.Format == OutputFormat.Json ? Console.Error : null;
+        DriftReporter.WriteReport(findings, Console.Out, options.CiMode, options.Format, annotations);
+    }
+
+    private static int CiExit(AppOptions options, int blocking, string noun)
+    {
+        if (!options.CiMode || blocking == 0)
+        {
+            return 0;
+        }
+
+        Console.Error.WriteLine($"ARTR.LockSight --ci: exiting 1 because {blocking} blocking {noun} were reported.");
+        return 1;
     }
 
     private static int WriteHelpAndExit()
@@ -99,25 +120,30 @@ public static class Program
 
     private static void WriteHelp(TextWriter writer)
     {
-        writer.WriteLine("ARTR.LockSight — local NuGet lockfile doctor (packages.lock.json)");
+        writer.WriteLine($"ARTR.LockSight {ToolVersion.Current} — local NuGet lockfile doctor (packages.lock.json)");
         writer.WriteLine();
         writer.WriteLine("Usage:");
-        writer.WriteLine("  artr-locksight drift [path] [--ci] [--fix]");
+        writer.WriteLine("  artr-locksight drift|scan [path] [--ci] [--strict] [--fix] [--format text|json]");
+        writer.WriteLine("  artr-locksight diff <left> <right> [--ci] [--format text|json]");
         writer.WriteLine("  artr-locksight explain|why [topic]");
         writer.WriteLine("  artr-locksight fix [path]");
         writer.WriteLine("  artr-locksight --fix [path]");
-        writer.WriteLine("  artr-locksight --help");
+        writer.WriteLine("  artr-locksight --version");
         writer.WriteLine();
         writer.WriteLine("Commands:");
-        writer.WriteLine("  drift     Scan for lockfile drift (pin-drift, multi-TFM, ProjectReference).");
-        writer.WriteLine("  explain   Human-readable NU1004 / RestoreLockedMode guide (alias: why).");
+        writer.WriteLine("  drift     Scan for lockfile drift (pins, TFMs, project references, orphans).");
+        writer.WriteLine("  diff      Compare two lockfiles, projects, or directories. No restore.");
+        writer.WriteLine("  explain   NU1004 / RestoreLockedMode guide (alias: why).");
         writer.WriteLine("  fix       Run dotnet restore --force-evaluate to regenerate lockfiles.");
         writer.WriteLine();
         writer.WriteLine("Flags:");
-        writer.WriteLine("  --ci      Non-zero exit when drift is found; CI-friendly annotations.");
-        writer.WriteLine("  --fix     After drift (or alone), wrap restore --force-evaluate.");
-        writer.WriteLine("  --path    Explicit solution/project/directory (also accepted as positional).");
+        writer.WriteLine("  --ci      Exit 1 when blocking drift or diff changes are found.");
+        writer.WriteLine("  --strict  With --ci, warnings also fail the run.");
+        writer.WriteLine("  --fix     With drift, regenerate lockfiles after the report.");
+        writer.WriteLine("  --format  text (default) or json. --json is the same as --format json.");
+        writer.WriteLine("  --path    Solution, project, or directory. Also accepted as a positional.");
         writer.WriteLine();
-        writer.WriteLine("This tool diagnoses locked restore failures locally. It does not replace Dependabot.");
+        writer.WriteLine("Exit codes: 0 success, 1 blocking findings in --ci, 2 usage or runtime error.");
+        writer.WriteLine("This tool diagnoses locked restore locally. It does not replace Dependabot.");
     }
 }
