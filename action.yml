@@ -9,13 +9,17 @@ inputs:
     required: false
     default: "."
   command:
-    description: "drift (default) or explain"
+    description: "drift (default), verify, or explain"
     required: false
     default: "drift"
   strict:
-    description: "When true, warnings also fail the job"
+    description: "When true, warnings also fail the static scan"
     required: false
     default: "false"
+  evaluate:
+    description: "When true, drift runs dotnet restore --locked-mode and NuGet decides pass or fail"
+    required: false
+    default: "true"
 runs:
   using: composite
   steps:
@@ -25,5 +29,6 @@ runs:
         LOCKSIGHT_PATH: ${{ inputs.path }}
         LOCKSIGHT_COMMAND: ${{ inputs.command }}
         LOCKSIGHT_STRICT: ${{ inputs.strict }}
+        LOCKSIGHT_EVALUATE: ${{ inputs.evaluate }}
         LOCKSIGHT_ACTION_PATH: ${{ github.action_path }}
       run: bash "$LOCKSIGHT_ACTION_PATH/eng/run-locksight-action.sh"

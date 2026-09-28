@@ -9,12 +9,23 @@ public sealed class LockfilePolicy
     public bool? RestorePackagesWithLockFile { get; }
     public bool RestoreLockedMode { get; }
     public string? LockfilePath { get; }
+    public string ExpectedLockfilePath { get; }
+    public bool LockfilePathUnresolved { get; }
 
-    public LockfilePolicy(bool? restorePackagesWithLockFile, bool restoreLockedMode, string? lockfilePath)
+    public LockfilePolicy(
+        bool? restorePackagesWithLockFile,
+        bool restoreLockedMode,
+        string? lockfilePath,
+        string expectedLockfilePath,
+        bool lockfilePathUnresolved)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedLockfilePath);
+
         RestorePackagesWithLockFile = restorePackagesWithLockFile;
         RestoreLockedMode = restoreLockedMode;
         LockfilePath = lockfilePath;
+        ExpectedLockfilePath = expectedLockfilePath;
+        LockfilePathUnresolved = lockfilePathUnresolved;
     }
 
     /// <summary>

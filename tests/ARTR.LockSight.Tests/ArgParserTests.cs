@@ -81,4 +81,49 @@ public sealed class ArgParserTests
         Assert.False(ok);
         Assert.Contains("two paths", error, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void Parses_verify_as_locked_restore()
+    {
+        bool ok = ArgParser.TryParse(["verify", "./src"], out AppOptions options, out string error);
+
+        Assert.True(ok, error);
+        Assert.Equal(AppCommand.Drift, options.Command);
+        Assert.True(options.Evaluate);
+        Assert.Equal("./src", options.TargetPath);
+    }
+
+    [Fact]
+    public void Parses_evaluate_flag_on_drift()
+    {
+        bool ok = ArgParser.TryParse(["drift", "--evaluate"], out AppOptions options, out string error);
+
+        Assert.True(ok, error);
+        Assert.Equal(AppCommand.Drift, options.Command);
+        Assert.True(options.Evaluate);
+    }
+
+    [Fact]
+    public void Parses_diff_git_revision()
+    {
+        bool ok = ArgParser.TryParse(
+            ["diff", "--git", ".", "--revision", "abc123"],
+            out AppOptions options,
+            out string error);
+
+        Assert.True(ok, error);
+        Assert.Equal(AppCommand.Diff, options.Command);
+        Assert.True(options.GitDiff);
+        Assert.Equal(".", options.TargetPath);
+        Assert.Equal("abc123", options.Revision);
+    }
+
+    [Fact]
+    public void Rejects_diff_git_with_two_paths()
+    {
+        bool ok = ArgParser.TryParse(["diff", "--git", "left", "right"], out _, out string error);
+
+        Assert.False(ok);
+        Assert.Contains("second path", error, StringComparison.Ordinal);
+    }
 }

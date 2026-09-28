@@ -4,11 +4,13 @@ SPDX-License-Identifier: Apache-2.0
 
 Local CLI doctor for NuGet `packages.lock.json` and `NU1004` / `RestoreLockedMode` failures.
 
-This is **not** Dependabot and **not** “just run restore.” It tells you why a locked restore would fail: pin ranges, missing TFMs, project-reference lockfiles, orphan direct packages, and broken lock rows. It runs on your machine or in CI, with no network, until you ask it to regenerate lockfiles.
+This is **not** Dependabot and **not** “just run restore.” The static scan tells you why a locked restore would fail: pin ranges, missing TFMs, project-reference lockfiles, orphan direct packages, and broken lock rows. `verify` runs `dotnet restore --locked-mode` so NuGet is the pass/fail signal and the static scan explains the project NuGet named.
 
 ## Requirements
 
 - .NET SDK 10 (`net10.0`)
+
+Version **1.1.0** is not published to NuGet.org. [v1.0.0](https://github.com/Chookees/ARTR.LockSight/releases/tag/v1.0.0) is the tagged release; its nupkg is attached there.
 
 ## Install
 
@@ -18,14 +20,14 @@ Tool command: **`artr-locksight`**
 
 ```bash
 dotnet pack src/ARTR.LockSight/ARTR.LockSight.csproj -c Release -o ./artifacts
-dotnet tool install ARTR.LockSight --add-source ./artifacts --version 1.0.0 --tool-path ./tools
+dotnet tool install ARTR.LockSight --add-source ./artifacts --version 1.1.0 --tool-path ./tools
 ./tools/artr-locksight --version
 ```
 
-### After the package is on NuGet.org
+### From the v1.0.0 release asset
 
 ```bash
-dotnet tool install -g ARTR.LockSight
+dotnet tool install ARTR.LockSight --add-source /path/to/downloaded --version 1.0.0 --tool-path ./tools
 ```
 
 A repo-local manifest works the same way: `dotnet new tool-manifest` then `dotnet tool install` with `--add-source`.
@@ -34,7 +36,7 @@ A repo-local manifest works the same way: `dotnet new tool-manifest` then `dotne
 
 ### `drift` (alias `scan`)
 
-Scans a directory, a project, or a `.sln` / `.slnx`. Prints one row per project, TFM, package, and reason.
+Scans a directory, a project, a `.sln` / `.slnx`, or a `.slnf` solution filter. A filter lists only its projects; paths are relative to the solution directory. Prints one row per project, TFM, package, and reason.
 
 ```bash
 artr-locksight drift
@@ -54,10 +56,14 @@ artr-locksight drift path/to/App.csproj --format json
 | `UnreadableInput` | error | A project or lockfile could not be parsed |
 | `MultiTfmVersionSkew` | warning | The same direct package resolved to different versions across TFMs |
 | `StaleTfm` | warning | The lockfile still has a TFM the project does not target |
+| `LockfilePathUnresolved` | warning | `NuGetLockFilePath` contains a `$(...)` this tool cannot expand. The scan falls back to `packages.lock.json` beside the project |
+| `LockedRestoreFailed` | error | `verify` / `--evaluate` saw a failed locked restore (usually NU1004) |
 
 A bare version such as `13.0.3` is the NuGet range `[13.0.3, )`. A resolved version inside that range is not drift. The lockfile `requested` range has to match the pin.
 
 The scanner reads the nearest `Directory.Build.props`, `Directory.Build.targets`, and `Directory.Packages.props`. It does not run a full MSBuild evaluation. Conditions are honored only when they mention `TargetFramework` and quote a TFM.
+
+`NuGetLockFilePath` may use `$(MSBuildProjectDirectory)`, `$(MSBuildProjectName)`, and `$(MSBuildThisFileDirectory)`. Any other `$(...)` is a warning, and the scan reads `packages.lock.json` next to the project.
 
 ### `explain` / `why`
 
@@ -66,13 +72,23 @@ artr-locksight explain
 artr-locksight why nu1004
 ```
 
+### `verify` / `drift --evaluate`
+
+Runs `dotnet restore --locked-mode`. Exit 0 means NuGet accepted the lockfiles. A failed restore exits with NuGet's code even without `--ci`, and the report attaches NU1004 plus static findings for that project. If restore succeeds, leftover static findings are printed and do not fail the run. Needs your NuGet feeds (or a warm cache).
+
+```bash
+artr-locksight verify ./My.sln
+artr-locksight drift ./My.sln --evaluate --format json
+```
+
 ### `diff`
 
-Compares two lockfiles, two projects, or two directories. Nothing is restored.
+Compares two lockfiles, two projects, or two directories. Nothing is restored. `diff --git` compares the working tree with a git revision (default `HEAD`).
 
 ```bash
 artr-locksight diff ./before/packages.lock.json ./after/packages.lock.json
 artr-locksight diff ./left-tree ./right-tree --ci
+artr-locksight diff --git . --revision HEAD
 ```
 
 ### `fix` / `--fix`
@@ -96,8 +112,8 @@ artr-locksight drift . --ci --strict
 
 | Exit | When |
 |------|------|
-| 0 | No blocking findings. Warnings alone stay 0. |
-| 1 | `--ci` and at least one error (or any warning when `--strict`) |
+| 0 | No blocking findings, or `verify` and NuGet accepted the lockfiles. Warnings alone stay 0. |
+| 1 | `--ci` and at least one static error (or any warning when `--strict`), or a failed locked restore |
 | 2 | Bad arguments, missing path, or a runtime failure |
 
 `--ci` also prints GitHub Actions `::error` and `::warning` lines. `--format json` keeps JSON on stdout and moves those annotations to stderr.
@@ -110,13 +126,13 @@ The repository root is a composite action. The job needs the .NET 10 SDK first.
 - uses: actions/setup-dotnet@v4
   with:
     dotnet-version: 10.0.x
-- uses: Chookees/ARTR.LockSight@main
+- uses: Chookees/ARTR.LockSight@v1.0.0
   with:
     path: Your.sln
     strict: "false"
 ```
 
-From this repo, `uses: ./` runs the same action. `command: explain` prints the NU1004 guide instead of failing on drift.
+`@v1.0.0` builds the tool with `dotnet run` and does not run locked restore. On `main` after 1.1, the action packs the tool, installs it, and runs `drift --evaluate` unless you set `evaluate: "false"`. `command: verify` is the same NuGet check. `command: explain` prints the NU1004 guide. From this repo, `uses: ./` runs the action in the checkout.
 
 ## Dogfood
 
@@ -125,11 +141,12 @@ This repo enables `RestorePackagesWithLockFile` and `RestoreLockedMode` in `Dire
 ```bash
 dotnet test
 dotnet restore --locked-mode
+dotnet run --project src/ARTR.LockSight/ARTR.LockSight.csproj -- verify ARTR.LockSight.slnx
 dotnet run --project src/ARTR.LockSight/ARTR.LockSight.csproj -- drift ARTR.LockSight.slnx --ci
 dotnet run --project src/ARTR.LockSight/ARTR.LockSight.csproj -- explain
 ```
 
-Unit tests under `tests/ARTR.LockSight.Tests` cover parsing and reporting with temp projects, so they do not need a NuGet feed. `fix` is the one command that talks to the network; run it against a solution when you want to regenerate lockfiles.
+Unit tests under `tests/ARTR.LockSight.Tests` cover parsing and reporting with temp projects, so they do not call `dotnet restore`. `verify`, `drift --evaluate`, and `fix` talk to NuGet.
 
 ## License
 

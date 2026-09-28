@@ -52,6 +52,12 @@ public static class WorkspaceScanner
             return new ProjectSet(fullRoot, projects, missing);
         }
 
+        if (SolutionFilterReader.IsFilter(fullRoot))
+        {
+            SolutionFilterReader.Read(fullRoot, projects, missing);
+            return new ProjectSet(fullRoot, projects, missing);
+        }
+
         throw new InvalidDataException($"Target is not a directory, project, or solution: {fullRoot}");
     }
 
@@ -269,9 +275,28 @@ public static class ProjectFileReader
         IReadOnlyList<string> projectRefs = PackageGraphReader.ReadProjectReferences(projectDoc, fullProject);
         bool? useLockFile = LayerBool(propsDoc, projectDoc, targetsDoc, "RestorePackagesWithLockFile");
         bool lockedMode = LayerBool(propsDoc, projectDoc, targetsDoc, "RestoreLockedMode") == true;
-        string lockCandidate = Path.Combine(projectDir, "packages.lock.json");
+        string projectName = Path.GetFileNameWithoutExtension(fullProject);
+        var textSources = new List<TextSource>(capacity: 3);
+        if (propsDoc is not null && propsPath is not null)
+        {
+            textSources.Add(new TextSource(propsDoc, propsPath));
+        }
+
+        textSources.Add(new TextSource(projectDoc, fullProject));
+        if (targetsDoc is not null && targetsPath is not null)
+        {
+            textSources.Add(new TextSource(targetsDoc, targetsPath));
+        }
+
+        LayeredText lockPathText = LayerText(textSources, "NuGetLockFilePath");
+        bool resolvedPath = LockfilePathResolver.TryResolve(
+            projectDir,
+            projectName,
+            lockPathText.IsPresent ? lockPathText.Value : null,
+            lockPathText.SourcePath,
+            out string lockCandidate);
         string? lockfilePath = File.Exists(lockCandidate) ? lockCandidate : null;
-        var policy = new LockfilePolicy(useLockFile, lockedMode, lockfilePath);
+        var policy = new LockfilePolicy(useLockFile, lockedMode, lockfilePath, lockCandidate, !resolvedPath);
         var pinList = new List<PackagePin>(packages.Count);
         foreach (PackagePin pin in packages.Values)
         {
@@ -328,6 +353,54 @@ public static class ProjectFileReader
         }
 
         return layered.IsPresent ? layered.Value : null;
+    }
+
+    private static LayeredText LayerText(IReadOnlyList<TextSource> sources, string name)
+    {
+        var layered = new LayeredText(false, string.Empty, string.Empty);
+        int limit = Math.Min(sources.Count, 3);
+        for (int i = 0; i < limit; i++)
+        {
+            layered = TakeText(layered, PackageGraphReader.ReadTextProperty(sources[i].Document, name), sources[i].Path);
+        }
+
+        return layered;
+    }
+
+    private static LayeredText TakeText(LayeredText current, SourcedText next, string sourcePath)
+    {
+        if (!next.IsPresent)
+        {
+            return current;
+        }
+
+        return new LayeredText(true, next.Value, sourcePath);
+    }
+
+    private readonly struct LayeredText
+    {
+        public bool IsPresent { get; }
+        public string Value { get; }
+        public string SourcePath { get; }
+
+        public LayeredText(bool isPresent, string value, string sourcePath)
+        {
+            IsPresent = isPresent;
+            Value = value;
+            SourcePath = sourcePath;
+        }
+    }
+
+    private readonly struct TextSource
+    {
+        public XDocument Document { get; }
+        public string Path { get; }
+
+        public TextSource(XDocument document, string path)
+        {
+            Document = document;
+            Path = path;
+        }
     }
 }
 

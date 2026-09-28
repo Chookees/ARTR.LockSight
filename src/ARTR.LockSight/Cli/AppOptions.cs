@@ -11,6 +11,9 @@ public sealed class AppOptions
     public bool CiMode { get; init; }
     public bool FixRequested { get; init; }
     public bool Strict { get; init; }
+    public bool Evaluate { get; init; }
+    public bool GitDiff { get; init; }
+    public string Revision { get; init; } = "HEAD";
     public OutputFormat Format { get; init; } = OutputFormat.Text;
     public string ExplainTopic { get; init; } = "nu1004";
 }
