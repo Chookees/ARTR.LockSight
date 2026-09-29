@@ -33,3 +33,4 @@ jobs:
         with:
           path: ARTR.LockSight.slnx
           strict: "false"
+          evaluate: "true"

@@ -20,6 +20,23 @@ internal readonly struct OptionalBool
 }
 
 /// <summary>
+/// Last literal text of one MSBuild property. Empty when the property is absent.
+/// </summary>
+internal readonly struct SourcedText
+{
+    public bool IsPresent { get; }
+    public string Value { get; }
+
+    public SourcedText(bool isPresent, string value)
+    {
+        IsPresent = isPresent;
+        Value = value;
+    }
+
+    public static SourcedText Absent => new(false, string.Empty);
+}
+
+/// <summary>
 /// Reads the project facts lockfile drift needs from XML, without invoking MSBuild.
 /// </summary>
 internal static class PackageGraphReader
@@ -107,6 +124,34 @@ internal static class PackageGraphReader
         }
 
         return found ? new OptionalBool(true, value) : OptionalBool.Absent;
+    }
+
+    public static SourcedText ReadTextProperty(XDocument doc, string name)
+    {
+        ArgumentNullException.ThrowIfNull(doc);
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+
+        bool found = false;
+        string value = string.Empty;
+        int seen = 0;
+        foreach (XElement element in doc.Descendants(name))
+        {
+            if (seen >= MaxPropertyHits)
+            {
+                break;
+            }
+
+            seen++;
+            if (string.IsNullOrWhiteSpace(element.Value))
+            {
+                continue;
+            }
+
+            found = true;
+            value = element.Value.Trim();
+        }
+
+        return found ? new SourcedText(true, value) : SourcedText.Absent;
     }
 
     public static void MergePackageReferences(

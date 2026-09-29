@@ -58,6 +58,17 @@ public static class ArgParser
             return state.Error.Length == 0;
         }
 
+        if (IsVerify(token))
+        {
+            if (!AcceptVerb(token, AppCommand.Drift, state))
+            {
+                return false;
+            }
+
+            state.Evaluate = true;
+            return true;
+        }
+
         if (IsVerb(token, out AppCommand verb))
         {
             return AcceptVerb(token, verb, state);
@@ -95,6 +106,28 @@ public static class ArgParser
         if (token is "--json")
         {
             state.Format = OutputFormat.Json;
+            return true;
+        }
+
+        if (token is "--evaluate")
+        {
+            state.Evaluate = true;
+            if (state.Command == AppCommand.None)
+            {
+                state.Command = AppCommand.Drift;
+            }
+
+            return true;
+        }
+
+        if (token is "--git")
+        {
+            state.GitDiff = true;
+            if (state.Command == AppCommand.None)
+            {
+                state.Command = AppCommand.Diff;
+            }
+
             return true;
         }
 
@@ -141,6 +174,15 @@ public static class ArgParser
             {
                 state.ComparePath = value;
                 state.CompareSeen = true;
+                return true;
+            }, state);
+        }
+
+        if (token is "--revision")
+        {
+            return ReadValue(args, ref index, token, value =>
+            {
+                state.Revision = value;
                 return true;
             }, state);
         }
@@ -229,16 +271,38 @@ public static class ArgParser
         error = string.Empty;
         if (state.Command == AppCommand.None)
         {
-            state.Command = state.CiMode ? AppCommand.Drift : AppCommand.Help;
+            if (state.GitDiff)
+            {
+                state.Command = AppCommand.Diff;
+            }
+            else
+            {
+                state.Command = state.CiMode || state.Evaluate ? AppCommand.Drift : AppCommand.Help;
+            }
         }
 
-        if (state.Command == AppCommand.Diff && (!state.PathSeen || !state.CompareSeen))
+        if (state.GitDiff && state.Command != AppCommand.Diff)
+        {
+            error = "--git is only valid with diff.";
+            options = new AppOptions();
+            return false;
+        }
+
+        if (state.Command == AppCommand.Diff && state.GitDiff && state.CompareSeen)
+        {
+            error = "diff --git compares the working tree to a git revision. Do not pass a second path.";
+            options = new AppOptions();
+            return false;
+        }
+
+        if (state.Command == AppCommand.Diff && !state.GitDiff && (!state.PathSeen || !state.CompareSeen))
         {
             error = "diff requires two paths: diff <left> <right>.";
             options = new AppOptions();
             return false;
         }
 
+        string revision = state.Revision.Length == 0 ? "HEAD" : state.Revision;
         string target = state.PathSeen ? state.TargetPath : Environment.CurrentDirectory;
         options = new AppOptions
         {
@@ -248,10 +312,18 @@ public static class ArgParser
             CiMode = state.CiMode,
             FixRequested = state.FixRequested,
             Strict = state.Strict,
+            Evaluate = state.Evaluate,
+            GitDiff = state.GitDiff,
+            Revision = revision,
             Format = state.Format,
             ExplainTopic = state.ExplainTopic,
         };
         return true;
+    }
+
+    private static bool IsVerify(string token)
+    {
+        return token.Equals("verify", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsVerb(string token, out AppCommand command)
@@ -295,6 +367,9 @@ public static class ArgParser
         public bool CiMode { get; set; }
         public bool FixRequested { get; set; }
         public bool Strict { get; set; }
+        public bool Evaluate { get; set; }
+        public bool GitDiff { get; set; }
+        public string Revision { get; set; } = "HEAD";
         public bool PathSeen { get; set; }
         public bool CompareSeen { get; set; }
         public bool TopicSeen { get; set; }

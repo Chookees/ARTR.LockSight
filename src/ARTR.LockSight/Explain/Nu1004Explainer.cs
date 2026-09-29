@@ -67,8 +67,12 @@ public static class Nu1004Explainer
         writer.WriteLine("   Compare two lockfiles or two directories without restoring.");
         writer.WriteLine("3. artr-locksight fix <path>");
         writer.WriteLine("   Runs: dotnet restore --force-evaluate. Commit the updated packages.lock.json files.");
-        writer.WriteLine("4. artr-locksight drift <path> --ci");
-        writer.WriteLine("   Exit 1 when blocking drift is found. Use this in pipelines and the GitHub Action.");
+        writer.WriteLine("4. artr-locksight verify <path>");
+        writer.WriteLine("   Runs dotnet restore --locked-mode. NuGet's exit code is the result.");
+        writer.WriteLine("   Static findings explain a failure and do not fail a successful restore.");
+        writer.WriteLine("   drift --evaluate is the same check. diff --git compares lockfiles to HEAD.");
+        writer.WriteLine("5. artr-locksight drift <path> --ci");
+        writer.WriteLine("   Exit 1 when blocking static drift is found. Use this when you want no restore.");
         writer.WriteLine();
         writer.WriteLine("How this differs from Dependabot");
         writer.WriteLine("--------------------------------");
@@ -81,6 +85,6 @@ public static class Nu1004Explainer
         writer.WriteLine("Conditions other than a quoted TargetFramework check are not evaluated. Package");
         writer.WriteLine("references that arrive through arbitrary MSBuild imports (other than the nearest");
         writer.WriteLine("Directory.Build.props, Directory.Build.targets, and Directory.Packages.props) are");
-        writer.WriteLine("not visible. Those cases can still need dotnet restore --force-evaluate.");
+        writer.WriteLine("not visible. verify still asks NuGet, which evaluates those imports.");
     }
 }

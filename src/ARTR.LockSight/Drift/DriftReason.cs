@@ -16,4 +16,6 @@ public enum DriftReason
     StaleTfm = 7,
     LockfileInconsistent = 8,
     UnreadableInput = 9,
+    LockfilePathUnresolved = 10,
+    LockedRestoreFailed = 11,
 }

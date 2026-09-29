@@ -14,6 +14,17 @@ internal static class DriftRules
             return;
         }
 
+        if (project.Policy.LockfilePathUnresolved)
+        {
+            Add(
+                findings,
+                project.ProjectPath,
+                JoinFrameworks(project.TargetFrameworks),
+                "(lockfile)",
+                DriftReason.LockfilePathUnresolved,
+                "NuGetLockFilePath uses an MSBuild expression this tool cannot expand. Checked packages.lock.json beside the project instead.");
+        }
+
         if (project.Policy.LockfilePath is null)
         {
             Add(
@@ -22,7 +33,7 @@ internal static class DriftRules
                 JoinFrameworks(project.TargetFrameworks),
                 "(project)",
                 DriftReason.MissingLockfile,
-                "Lockfiles or RestoreLockedMode are enabled, but packages.lock.json is missing.");
+                $"Lockfiles or RestoreLockedMode are enabled, but {project.Policy.ExpectedLockfilePath} is missing.");
             return;
         }
 

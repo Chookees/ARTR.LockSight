@@ -35,5 +35,7 @@ public sealed class DriftFinding
     /// Cross-TFM version differences and leftover TFM sections are often legitimate.
     /// </summary>
     public bool IsWarning =>
-        Reason is DriftReason.MultiTfmVersionSkew or DriftReason.StaleTfm;
+        Reason is DriftReason.MultiTfmVersionSkew
+            or DriftReason.StaleTfm
+            or DriftReason.LockfilePathUnresolved;
 }
