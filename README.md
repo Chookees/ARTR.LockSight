@@ -10,7 +10,7 @@ This is **not** Dependabot and **not** “just run restore.” The static scan t
 
 - .NET SDK 10 (`net10.0`)
 
-Version **1.1.0** is not published to NuGet.org. [v1.0.0](https://github.com/Chookees/ARTR.LockSight/releases/tag/v1.0.0) is the tagged release; its nupkg is attached there.
+Version **1.1.0** is not published to NuGet.org. Until this release-hygiene work merges and a `v1.1.0` tag is cut on that merge, the tagged GitHub Release is still [v1.0.0](https://github.com/Chookees/ARTR.LockSight/releases/tag/v1.0.0) (nupkg attached there).
 
 ## Install
 
@@ -126,13 +126,16 @@ The repository root is a composite action. The job needs the .NET 10 SDK first.
 - uses: actions/setup-dotnet@v4
   with:
     dotnet-version: 10.0.x
-- uses: Chookees/ARTR.LockSight@v1.0.0
+- uses: Chookees/ARTR.LockSight@v1.1.0
   with:
     path: Your.sln
     strict: "false"
+    evaluate: "false"
 ```
 
-`@v1.0.0` builds the tool with `dotnet run` and does not run locked restore. On `main` after 1.1, the action packs the tool, installs it, and runs `drift --evaluate` unless you set `evaluate: "false"`. `command: verify` is the same NuGet check. `command: explain` prints the NU1004 guide. From this repo, `uses: ./` runs the action in the checkout.
+The action default is `evaluate: true`: drift plus locked restore (`drift --ci --evaluate`). The first consumer wire must set `evaluate: "false"` so the job runs the static drift scan with `--ci` and skips restore. That is still a failing gate when drift finds blocking issues; it is not a report-only mode.
+
+`command: verify` is the same NuGet check as evaluate. `command: explain` prints the NU1004 guide. From this repo, `uses: ./` runs the action in the checkout. Pin examples at `@v1.1.0` so they match the tool Version once that tag exists; until then the published tag remains `v1.0.0`.
 
 ## Dogfood
 
